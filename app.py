@@ -5,7 +5,6 @@ from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from datetime import datetime
 import threading
-import time
 
 app = Flask(__name__)
 CORS(app)
@@ -18,7 +17,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 def get_data_files():
     """accounts1.txt'den accounts20.txt'ye kadar tüm dosyaları döndürür"""
     files = []
-    for i in range(1, 21):  # 1'den 20'ye kadar
+    for i in range(1, 21):
         file_path = os.path.join(DATA_DIR, f'accounts{i}.txt')
         files.append(file_path)
     return files
@@ -26,89 +25,68 @@ def get_data_files():
 DATA_FILES = get_data_files()
 
 # ============================================
-# CACHE SİSTEMİ (Çoklu Dosya için)
+# DOSYA OKUMA - SATIR SATIR (RAM DOSTU)
 # ============================================
-class MultiAccountCache:
-    def __init__(self):
-        self.files_data = {}  # {file_path: [lines]}
-        self.last_modified = {}  # {file_path: mtime}
-        self.lock = threading.Lock()
-        self.total_lines = 0
-        self.file_stats = {}  # Her dosya için istatistik
+def search_in_file(file_path, query, limit=1000):
+    """
+    Bir dosyada arama yapar - satır satır okur, RAM'e yüklemez
+    """
+    results = []
+    query_lower = query.lower()
     
-    def load_all(self):
-        """Tüm dosyaları yükler"""
-        with self.lock:
-            total = 0
-            self.file_stats = {}
-            
-            for file_path in DATA_FILES:
-                if not os.path.exists(file_path):
-                    continue
-                
-                current_mtime = os.path.getmtime(file_path)
-                if current_mtime == self.last_modified.get(file_path, 0) and file_path in self.files_data:
-                    total += len(self.files_data[file_path])
-                    self.file_stats[os.path.basename(file_path)] = {
-                        'lines': len(self.files_data[file_path]),
-                        'size_mb': os.path.getsize(file_path) / (1024*1024),
-                        'last_modified': datetime.fromtimestamp(current_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    continue
-                
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = []
-                        for line in f:
-                            line = line.strip()
-                            if line and not line.startswith('#'):
-                                lines.append(line)
-                        
-                        self.files_data[file_path] = lines
-                        self.last_modified[file_path] = current_mtime
-                        total += len(lines)
-                        
-                        self.file_stats[os.path.basename(file_path)] = {
-                            'lines': len(lines),
-                            'size_mb': os.path.getsize(file_path) / (1024*1024),
-                            'last_modified': datetime.fromtimestamp(current_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                        print(f"✅ Yüklendi: {os.path.basename(file_path)} - {len(lines)} satır")
-                except Exception as e:
-                    print(f"❌ Dosya okuma hatası ({file_path}): {e}")
-            
-            self.total_lines = total
-            print(f"📊 Toplam yüklenen satır: {self.total_lines}")
-            return self.files_data
-    
-    def search(self, query):
-        """Tüm dosyalarda arama yapar"""
-        self.load_all()
-        query_lower = query.lower()
-        results = []
-        
-        for file_path, lines in self.files_data.items():
-            for line in lines:
-                if query_lower in line.lower():
-                    results.append({
-                        'line': line,
-                        'file': os.path.basename(file_path)
-                    })
-        
+    if not os.path.exists(file_path):
         return results
     
-    def get_stats(self):
-        """İstatistikleri döndürür"""
-        self.load_all()
-        return {
-            'total': self.total_lines,
-            'total_files': len([f for f in self.files_data if self.files_data[f]]),
-            'files': self.file_stats,
-            'timestamp': datetime.now().isoformat()
-        }
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                if query_lower in line.lower():
+                    results.append(line)
+                    if len(results) >= limit:
+                        break
+    except Exception as e:
+        print(f"❌ Dosya okuma hatası ({file_path}): {e}")
+    
+    return results
 
-# Global cache instance
-cache = MultiAccountCache()
+def count_lines_in_file(file_path):
+    """Bir dosyadaki toplam satır sayısını hızlıca sayar"""
+    if not os.path.exists(file_path):
+        return 0
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            count = 0
+            for line in f:
+                if line.strip() and not line.startswith('#'):
+                    count += 1
+        return count
+    except:
+        return 0
+
+def get_file_stats():
+    """Tüm dosyaların istatistiklerini döndürür"""
+    stats = {}
+    total_lines = 0
+    
+    for file_path in DATA_FILES:
+        if os.path.exists(file_path):
+            lines = count_lines_in_file(file_path)
+            size_mb = os.path.getsize(file_path) / (1024*1024)
+            mtime = datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S')
+            
+            stats[os.path.basename(file_path)] = {
+                'lines': lines,
+                'size_mb': round(size_mb, 2),
+                'last_modified': mtime
+            }
+            total_lines += lines
+    
+    return stats, total_lines
 
 # ============================================
 # EVRENSEL FORMAT DETECTION
@@ -364,7 +342,7 @@ def index():
                     fileStatsHtml += `
                         <div class="file-item">
                             <div class="name">📄 ${name}</div>
-                            <div class="info">${info.lines} lines | ${info.size_mb.toFixed(2)} MB</div>
+                            <div class="info">${info.lines} lines | ${info.size_mb} MB</div>
                         </div>
                     `;
                 }
@@ -376,14 +354,14 @@ def index():
     ''')
 
 # ============================================
-# API: SEARCH
+# API: SEARCH - OPTİMİZE EDİLMİŞ
 # ============================================
 @app.route('/search')
 def search():
     query = request.args.get('q', '').strip()
-    limit = request.args.get('limit', 1000, type=int)
+    limit = request.args.get('limit', 100, type=int)  # Maksimum sonuç limiti
     offset = request.args.get('offset', 0, type=int)
-    file_filter = request.args.get('file', '')  # Belirli bir dosyada ara
+    file_filter = request.args.get('file', '')
     
     if not query:
         return jsonify({
@@ -391,35 +369,49 @@ def search():
             'results': []
         }), 400
     
-    # Tüm dosyalarda ara
-    results = cache.search(query)
+    # Maksimum limit 5000
+    if limit > 5000:
+        limit = 5000
+    
+    all_results = []
+    files_to_search = DATA_FILES
     
     # Dosya filtresi uygula
     if file_filter:
-        results = [r for r in results if file_filter in r['file']]
+        files_to_search = [f for f in DATA_FILES if file_filter in os.path.basename(f)]
     
-    # Detaylı sonuçlar oluştur
-    detailed_results = []
-    for result in results:
-        detected = detect_format(result['line'])
-        if detected:
-            detailed_results.append({
-                'line': result['line'],
-                'file': result['file'],
-                'username': detected['username'],
-                'password': detected['password']
-            })
-        else:
-            detailed_results.append({
-                'line': result['line'],
-                'file': result['file'],
-                'username': 'Unknown',
-                'password': 'Unknown'
-            })
+    # Her dosyada ara (satır satır)
+    for file_path in files_to_search:
+        if not os.path.exists(file_path):
+            continue
+        
+        found_lines = search_in_file(file_path, query, limit=limit)
+        file_name = os.path.basename(file_path)
+        
+        for line in found_lines:
+            detected = detect_format(line)
+            if detected:
+                all_results.append({
+                    'line': line,
+                    'file': file_name,
+                    'username': detected['username'],
+                    'password': detected['password']
+                })
+            else:
+                all_results.append({
+                    'line': line,
+                    'file': file_name,
+                    'username': 'Unknown',
+                    'password': 'Unknown'
+                })
+        
+        # Toplam limit aşıldıysa dur
+        if len(all_results) >= limit:
+            break
     
-    # Limit ve offset uygula
-    total = len(detailed_results)
-    detailed_results = detailed_results[offset:offset + limit]
+    # Offset uygula
+    total = len(all_results)
+    paginated_results = all_results[offset:offset + limit]
     
     return jsonify({
         'query': query,
@@ -427,33 +419,38 @@ def search():
         'limit': limit,
         'offset': offset,
         'file_filter': file_filter,
-        'results': detailed_results,
+        'results': paginated_results,
         'timestamp': datetime.now().isoformat()
     })
 
 # ============================================
-# API: STATS
+# API: STATS - OPTİMİZE EDİLMİŞ
 # ============================================
 @app.route('/stats')
 def stats():
-    stats_data = cache.get_stats()
-    return jsonify(stats_data)
+    stats_data, total_lines = get_file_stats()
+    return jsonify({
+        'total': total_lines,
+        'total_files': len(stats_data),
+        'files': stats_data,
+        'timestamp': datetime.now().isoformat()
+    })
 
 # ============================================
-# API: FILES LIST
+# API: FILES LIST - OPTİMİZE EDİLMİŞ
 # ============================================
 @app.route('/files')
 def files_list():
     """Tüm dosyaları ve içeriklerini listeler"""
-    cache.load_all()
     result = {}
     
-    for file_path, lines in cache.files_data.items():
-        result[os.path.basename(file_path)] = {
-            'total': len(lines),
-            'size_mb': os.path.getsize(file_path) / (1024*1024) if os.path.exists(file_path) else 0,
-            'preview': lines[:5] if lines else []
-        }
+    for file_path in DATA_FILES:
+        if os.path.exists(file_path):
+            lines = count_lines_in_file(file_path)
+            result[os.path.basename(file_path)] = {
+                'total': lines,
+                'size_mb': round(os.path.getsize(file_path) / (1024*1024), 2)
+            }
     
     return jsonify({
         'total_files': len(result),
@@ -461,46 +458,39 @@ def files_list():
     })
 
 # ============================================
-# API: RELOAD ALL
-# ============================================
-@app.route('/admin/reload', methods=['POST'])
-def reload_all():
-    """Tüm cache'i yeniden yükler"""
-    cache.load_all()
-    stats = cache.get_stats()
-    return jsonify({
-        'success': True,
-        'message': 'All caches reloaded',
-        'total': cache.total_lines,
-        'files_loaded': len(stats['files'])
-    })
-
-# ============================================
 # API: SEARCH BY FILE
 # ============================================
 @app.route('/search/file/<filename>')
-def search_by_file(filename, query):
+def search_by_file(filename):
     """Belirli bir dosyada arama yapar"""
     query = request.args.get('q', '').strip()
+    limit = request.args.get('limit', 1000, type=int)
     
     if not query:
         return jsonify({'error': 'Query parameter "q" is required'}), 400
     
-    cache.load_all()
-    query_lower = query.lower()
+    # Dosyayı bul
+    target_file = None
+    for file_path in DATA_FILES:
+        if filename in os.path.basename(file_path):
+            target_file = file_path
+            break
+    
+    if not target_file or not os.path.exists(target_file):
+        return jsonify({'error': f'File {filename} not found'}), 404
+    
+    # Dosyada ara
+    found_lines = search_in_file(target_file, query, limit=limit)
     results = []
     
-    for file_path, lines in cache.files_data.items():
-        if filename in os.path.basename(file_path):
-            for line in lines:
-                if query_lower in line.lower():
-                    detected = detect_format(line)
-                    results.append({
-                        'line': line,
-                        'file': os.path.basename(file_path),
-                        'username': detected['username'] if detected else 'Unknown',
-                        'password': detected['password'] if detected else 'Unknown'
-                    })
+    for line in found_lines:
+        detected = detect_format(line)
+        results.append({
+            'line': line,
+            'file': os.path.basename(target_file),
+            'username': detected['username'] if detected else 'Unknown',
+            'password': detected['password'] if detected else 'Unknown'
+        })
     
     return jsonify({
         'query': query,
@@ -520,21 +510,38 @@ def search_regex():
         return jsonify({'error': 'Pattern required'}), 400
     
     pattern = data['pattern']
+    limit = data.get('limit', 1000)
+    
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         return jsonify({'error': f'Invalid regex: {str(e)}'}), 400
     
-    cache.load_all()
     results = []
     
-    for file_path, lines in cache.files_data.items():
-        for line in lines:
-            if regex.search(line):
-                results.append({
-                    'line': line,
-                    'file': os.path.basename(file_path)
-                })
+    for file_path in DATA_FILES:
+        if not os.path.exists(file_path):
+            continue
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    if regex.search(line):
+                        results.append({
+                            'line': line,
+                            'file': os.path.basename(file_path)
+                        })
+                        if len(results) >= limit:
+                            break
+        except Exception as e:
+            print(f"❌ Regex arama hatası ({file_path}): {e}")
+        
+        if len(results) >= limit:
+            break
     
     return jsonify({
         'pattern': pattern,
@@ -569,8 +576,13 @@ if __name__ == '__main__':
                 f.write('# Format: URL:user:pass | email:pass | user:pass\n\n')
                 f.write('example:password\n')
     
-    # Cache'i ilk yükleme
-    cache.load_all()
+    print("🚀 API Başlatılıyor...")
+    print(f"📁 Veri klasörü: {DATA_DIR}")
+    print(f"📄 Toplam dosya: {len(DATA_FILES)}")
+    
+    # İstatistikleri göster
+    stats, total = get_file_stats()
+    print(f"📊 Toplam satır: {total}")
     
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
