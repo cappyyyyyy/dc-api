@@ -4,7 +4,8 @@ import json
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from datetime import datetime
-import threading
+import base64
+import urllib.parse
 
 app = Flask(__name__)
 CORS(app)
@@ -25,36 +26,226 @@ def get_data_files():
 DATA_FILES = get_data_files()
 
 # ============================================
-# DOSYA OKUMA - SATIR SATIR (RAM DOSTU)
+# EVRENSEL FORMAT PARSER - TÜM FORMATLAR
 # ============================================
-def search_in_file(file_path, query, limit=1000):
+def parse_android_format(line):
     """
-    Bir dosyada arama yapar - satır satır okur, RAM'e yüklemez
+    android:// formatını parse eder
+    android://TOKEN@PACKAGE/:USERNAME:PASSWORD
     """
-    results = []
-    query_lower = query.lower()
-    
-    if not os.path.exists(file_path):
-        return results
+    if not line.startswith('android://'):
+        return None
     
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                
-                if query_lower in line.lower():
-                    results.append(line)
-                    if len(results) >= limit:
-                        break
+        # android:// kısmını kaldır
+        content = line[10:]  # 'android://' uzunluğu = 10
+        
+        # @ işareti ile token ve gerisini ayır
+        if '@' not in content:
+            return None
+        
+        token_part, rest = content.split('@', 1)
+        
+        # /: ile package ve gerisini ayır
+        if '/:' not in rest:
+            return None
+        
+        package, credentials = rest.split('/:', 1)
+        
+        # : ile username ve password'u ayır
+        if ':' not in credentials:
+            return None
+        
+        # Birden fazla : varsa, ilk : username, son : password
+        parts = credentials.split(':')
+        if len(parts) >= 2:
+            username = ':'.join(parts[:-1])  # İlk kısımlar username
+            password = parts[-1]  # Son kısım password
+        else:
+            username = parts[0]
+            password = ''
+        
+        # Token'ı decode etmeyi dene (base64)
+        decoded_token = None
+        try:
+            decoded_token = base64.b64decode(token_part).decode('utf-8', errors='ignore')
+        except:
+            decoded_token = token_part
+        
+        return {
+            'format': 'android',
+            'token': token_part,
+            'token_decoded': decoded_token,
+            'package': package,
+            'username': username.strip(),
+            'password': password.strip(),
+            'full': line
+        }
     except Exception as e:
-        print(f"❌ Dosya okuma hatası ({file_path}): {e}")
+        return None
+
+def parse_standard_format(line):
+    """
+    Standart formatları parse eder:
+    - email:password
+    - username:password
+    - url:username:password
+    - url:email:password
+    """
+    if not line or ':' not in line:
+        return None
     
-    return results
+    parts = line.split(':')
+    
+    # URL içeriyor mu kontrol et
+    has_url = any('.' in part and ('://' in part or '/' in part) for part in parts)
+    
+    if has_url:
+        # URL:USER:PASS formatı
+        if len(parts) >= 3:
+            url = parts[0]
+            username = ':'.join(parts[1:-1])
+            password = parts[-1]
+            return {
+                'format': 'url',
+                'url': url,
+                'username': username.strip(),
+                'password': password.strip(),
+                'full': line
+            }
+    else:
+        # USER:PASS formatı
+        if len(parts) == 2:
+            return {
+                'format': 'standard',
+                'username': parts[0].strip(),
+                'password': parts[1].strip(),
+                'full': line
+            }
+        elif len(parts) > 2:
+            # Çoklu : varsa, ilk kısım username, son kısım password
+            username = ':'.join(parts[:-1])
+            password = parts[-1]
+            return {
+                'format': 'standard',
+                'username': username.strip(),
+                'password': password.strip(),
+                'full': line
+            }
+    
+    return None
+
+def parse_json_format(line):
+    """JSON formatını parse eder"""
+    try:
+        data = json.loads(line)
+        if isinstance(data, dict):
+            # Yaygın alan adlarını kontrol et
+            username = data.get('username') or data.get('user') or data.get('email') or data.get('login') or ''
+            password = data.get('password') or data.get('pass') or data.get('pwd') or ''
+            return {
+                'format': 'json',
+                'username': str(username),
+                'password': str(password),
+                'full': line,
+                'data': data
+            }
+    except:
+        pass
+    return None
+
+def parse_cookie_format(line):
+    """Cookie formatını parse eder"""
+    if '=' in line and (';' in line or 'cookie' in line.lower()):
+        try:
+            # Basit cookie parse
+            cookies = {}
+            for item in line.split(';'):
+                if '=' in item:
+                    key, value = item.split('=', 1)
+                    cookies[key.strip()] = value.strip()
+            
+            if cookies:
+                return {
+                    'format': 'cookie',
+                    'cookies': cookies,
+                    'full': line
+                }
+        except:
+            pass
+    return None
+
+def parse_any_format(line):
+    """
+    Her türlü formatı tespit edip parse eder
+    """
+    if not line or line.startswith('#'):
+        return None
+    
+    # Android format
+    result = parse_android_format(line)
+    if result:
+        return result
+    
+    # JSON format
+    result = parse_json_format(line)
+    if result:
+        return result
+    
+    # Cookie format
+    result = parse_cookie_format(line)
+    if result:
+        return result
+    
+    # Standart format
+    result = parse_standard_format(line)
+    if result:
+        return result
+    
+    # Hiçbir formata uymuyorsa ham olarak döndür
+    return {
+        'format': 'unknown',
+        'full': line,
+        'username': 'Unknown',
+        'password': 'Unknown'
+    }
+
+# ============================================
+# DOSYA OKUMA - SATIR SATIR (RAM DOSTU)
+# ============================================
+def search_in_all_files(query, files_to_search=None):
+    """
+    Tüm dosyalarda arar ve SONUÇ LİMİTİ OLMADAN tüm eşleşmeleri döndürür
+    """
+    if files_to_search is None:
+        files_to_search = DATA_FILES
+    
+    all_results = []
+    query_lower = query.lower()
+    
+    for file_path in files_to_search:
+        if not os.path.exists(file_path):
+            continue
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    # Arama yap
+                    if query_lower in line.lower():
+                        parsed = parse_any_format(line)
+                        parsed['file'] = os.path.basename(file_path)
+                        all_results.append(parsed)
+        except Exception as e:
+            print(f"❌ Dosya okuma hatası ({file_path}): {e}")
+    
+    return all_results
 
 def count_lines_in_file(file_path):
-    """Bir dosyadaki toplam satır sayısını hızlıca sayar"""
+    """Bir dosyadaki toplam satır sayısını sayar"""
     if not os.path.exists(file_path):
         return 0
     
@@ -89,43 +280,6 @@ def get_file_stats():
     return stats, total_lines
 
 # ============================================
-# EVRENSEL FORMAT DETECTION
-# ============================================
-def detect_format(line):
-    """Her türlü formatı tespit eder"""
-    if not line or ':' not in line:
-        return None
-    
-    parts = line.split(':')
-    
-    if len(parts) == 2:
-        return {
-            'username': parts[0].strip(),
-            'password': parts[1].strip(),
-            'full': line
-        }
-    elif len(parts) >= 3:
-        url = parts[0]
-        if '://' in url or '.' in url:
-            username = ':'.join(parts[1:-1])
-            password = parts[-1]
-            return {
-                'username': username.strip(),
-                'password': password.strip(),
-                'full': line
-            }
-        else:
-            username = ':'.join(parts[0:-1])
-            password = parts[-1]
-            return {
-                'username': username.strip(),
-                'password': password.strip(),
-                'full': line
-            }
-    
-    return None
-
-# ============================================
 # ANA SAYFA - HTML TEMPLATE
 # ============================================
 @app.route('/')
@@ -136,7 +290,7 @@ def index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Account API</title>
+    <title>Multi-Account API - Universal Parser</title>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { 
@@ -149,7 +303,7 @@ def index():
             justify-content: center;
         }
         .container {
-            max-width: 900px;
+            max-width: 1200px;
             width: 100%;
             padding: 40px 20px;
         }
@@ -217,10 +371,33 @@ def index():
             transform: scale(1.02);
             box-shadow: 0 4px 20px rgba(167, 139, 250, 0.3);
         }
+        .format-filter {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .format-filter button {
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1px solid #2a2a2a;
+            background: transparent;
+            color: #71717a;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .format-filter button:hover {
+            border-color: #a78bfa;
+            color: #e4e4e7;
+        }
+        .format-filter button.active {
+            background: #a78bfa20;
+            border-color: #a78bfa;
+            color: #a78bfa;
+        }
         .results {
             margin-top: 20px;
-            max-height: 500px;
-            overflow-y: auto;
         }
         .result-item {
             background: #0d0d0d;
@@ -235,25 +412,40 @@ def index():
         }
         .result-item .line {
             color: #e4e4e7;
-            font-size: 14px;
+            font-size: 13px;
             font-family: monospace;
             word-break: break-all;
         }
+        .result-item .info {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+            font-size: 12px;
+        }
+        .result-item .info .label {
+            color: #52525b;
+        }
+        .result-item .info .value {
+            color: #e4e4e7;
+        }
         .result-item .file-name {
             color: #60a5fa;
-            font-size: 12px;
-            margin-top: 4px;
         }
-        .result-item .badge {
+        .result-item .format-badge {
             display: inline-block;
-            padding: 2px 8px;
+            padding: 2px 10px;
             border-radius: 12px;
             font-size: 10px;
             font-weight: 600;
-            margin-top: 6px;
-            background: #a78bfa20;
-            color: #a78bfa;
+            text-transform: uppercase;
         }
+        .format-badge.android { background: #f472b620; color: #f472b6; }
+        .format-badge.standard { background: #60a5fa20; color: #60a5fa; }
+        .format-badge.url { background: #34d39920; color: #34d399; }
+        .format-badge.json { background: #fbbf2420; color: #fbbf24; }
+        .format-badge.cookie { background: #a78bfa20; color: #a78bfa; }
+        .format-badge.unknown { background: #52525b20; color: #71717a; }
         .empty {
             color: #52525b;
             text-align: center;
@@ -297,24 +489,34 @@ def index():
             color: #3a3a3a;
             font-size: 12px;
         }
+        .result-count {
+            color: #71717a;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
         @media (max-width: 600px) {
             .card { padding: 20px; }
             .search-box { flex-direction: column; }
             .stats .file-stats { grid-template-columns: 1fr; }
+            .result-item .info { flex-direction: column; gap: 4px; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="card">
-            <h1>📚 Multi-Account API</h1>
-            <p class="subtitle">Search across 20 different account files</p>
-            <span class="status">🟢 Online - 20 Files</span>
+            <h1>📚 Universal Account Parser</h1>
+            <p class="subtitle">Search across 20 files - All formats supported</p>
+            <span class="status">🟢 Online - Unlimited Results</span>
             
-            <form method="GET" action="/search" class="search-box">
-                <input type="text" name="q" placeholder="Search any keyword in all files..." required>
+            <form method="GET" action="/search" class="search-box" id="searchForm">
+                <input type="text" name="q" placeholder="Search any keyword..." required>
                 <button type="submit">🔍 Search</button>
             </form>
+            
+            <div id="resultsContainer">
+                <div class="empty">Enter a search term to find accounts</div>
+            </div>
             
             <div class="stats">
                 <div class="total">
@@ -325,11 +527,12 @@ def index():
             </div>
         </div>
         <div class="footer">
-            <span>Powered by Multi-Account API v2.0 (20 Files)</span>
+            <span>Powered by Universal Account Parser v3.0 - All Formats Supported</span>
         </div>
     </div>
     
     <script>
+        // Load stats
         fetch('/stats')
             .then(res => res.json())
             .then(data => {
@@ -348,19 +551,108 @@ def index():
                 }
                 document.getElementById('fileStats').innerHTML = fileStatsHtml || 'No files loaded';
             });
+        
+        // Handle search form submission
+        document.getElementById('searchForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const query = this.querySelector('input[name="q"]').value;
+            if (!query) return;
+            
+            fetch(`/search?q=${encodeURIComponent(query)}`)
+                .then(res => res.json())
+                .then(data => {
+                    displayResults(data);
+                })
+                .catch(err => {
+                    document.getElementById('resultsContainer').innerHTML = 
+                        `<div class="empty">❌ Error: ${err.message}</div>`;
+                });
+        });
+        
+        function displayResults(data) {
+            const container = document.getElementById('resultsContainer');
+            
+            if (!data.results || data.results.length === 0) {
+                container.innerHTML = `<div class="empty">🔍 No results found for "${data.query}"</div>`;
+                return;
+            }
+            
+            let html = `
+                <div class="result-count">
+                    📊 Found <strong>${data.total}</strong> results for "${data.query}"
+                </div>
+            `;
+            
+            data.results.forEach((item, index) => {
+                const formatClass = item.format || 'unknown';
+                let details = '';
+                
+                if (item.format === 'android') {
+                    details = `
+                        <div class="info">
+                            <span><span class="label">Package:</span> <span class="value">${item.package || 'N/A'}</span></span>
+                            <span><span class="label">User:</span> <span class="value">${item.username || 'N/A'}</span></span>
+                            <span><span class="label">Pass:</span> <span class="value">${item.password || 'N/A'}</span></span>
+                            <span><span class="label">File:</span> <span class="file-name">${item.file}</span></span>
+                        </div>
+                    `;
+                } else if (item.format === 'json') {
+                    details = `
+                        <div class="info">
+                            <span><span class="label">User:</span> <span class="value">${item.username || 'N/A'}</span></span>
+                            <span><span class="label">Pass:</span> <span class="value">${item.password || 'N/A'}</span></span>
+                            <span><span class="label">File:</span> <span class="file-name">${item.file}</span></span>
+                        </div>
+                    `;
+                } else if (item.format === 'cookie') {
+                    const cookieCount = item.cookies ? Object.keys(item.cookies).length : 0;
+                    details = `
+                        <div class="info">
+                            <span><span class="label">Cookies:</span> <span class="value">${cookieCount} cookies</span></span>
+                            <span><span class="label">File:</span> <span class="file-name">${item.file}</span></span>
+                        </div>
+                    `;
+                } else {
+                    details = `
+                        <div class="info">
+                            <span><span class="label">User:</span> <span class="value">${item.username || 'N/A'}</span></span>
+                            <span><span class="label">Pass:</span> <span class="value">${item.password || 'N/A'}</span></span>
+                            <span><span class="label">File:</span> <span class="file-name">${item.file}</span></span>
+                        </div>
+                    `;
+                }
+                
+                html += `
+                    <div class="result-item">
+                        <div class="line">${escapeHtml(item.full || item.line || 'N/A')}</div>
+                        <div style="margin-top:6px;">
+                            <span class="format-badge ${formatClass}">${formatClass}</span>
+                        </div>
+                        ${details}
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
     </script>
 </body>
 </html>
     ''')
 
 # ============================================
-# API: SEARCH - OPTİMİZE EDİLMİŞ
+# API: SEARCH - SINIRSIZ SONUÇ
 # ============================================
 @app.route('/search')
 def search():
     query = request.args.get('q', '').strip()
-    limit = request.args.get('limit', 100, type=int)  # Maksimum sonuç limiti
-    offset = request.args.get('offset', 0, type=int)
+    format_filter = request.args.get('format', '')  # android, standard, url, json, cookie
     file_filter = request.args.get('file', '')
     
     if not query:
@@ -369,62 +661,29 @@ def search():
             'results': []
         }), 400
     
-    # Maksimum limit 5000
-    if limit > 5000:
-        limit = 5000
-    
-    all_results = []
-    files_to_search = DATA_FILES
-    
     # Dosya filtresi uygula
+    files_to_search = DATA_FILES
     if file_filter:
         files_to_search = [f for f in DATA_FILES if file_filter in os.path.basename(f)]
     
-    # Her dosyada ara (satır satır)
-    for file_path in files_to_search:
-        if not os.path.exists(file_path):
-            continue
-        
-        found_lines = search_in_file(file_path, query, limit=limit)
-        file_name = os.path.basename(file_path)
-        
-        for line in found_lines:
-            detected = detect_format(line)
-            if detected:
-                all_results.append({
-                    'line': line,
-                    'file': file_name,
-                    'username': detected['username'],
-                    'password': detected['password']
-                })
-            else:
-                all_results.append({
-                    'line': line,
-                    'file': file_name,
-                    'username': 'Unknown',
-                    'password': 'Unknown'
-                })
-        
-        # Toplam limit aşıldıysa dur
-        if len(all_results) >= limit:
-            break
+    # Tüm sonuçları bul (limit yok)
+    all_results = search_in_all_files(query, files_to_search)
     
-    # Offset uygula
-    total = len(all_results)
-    paginated_results = all_results[offset:offset + limit]
+    # Format filtresi uygula
+    if format_filter:
+        all_results = [r for r in all_results if r.get('format') == format_filter]
     
     return jsonify({
         'query': query,
-        'total': total,
-        'limit': limit,
-        'offset': offset,
+        'total': len(all_results),
+        'format_filter': format_filter,
         'file_filter': file_filter,
-        'results': paginated_results,
+        'results': all_results,
         'timestamp': datetime.now().isoformat()
     })
 
 # ============================================
-# API: STATS - OPTİMİZE EDİLMİŞ
+# API: STATS
 # ============================================
 @app.route('/stats')
 def stats():
@@ -437,7 +696,7 @@ def stats():
     })
 
 # ============================================
-# API: FILES LIST - OPTİMİZE EDİLMİŞ
+# API: FILES LIST
 # ============================================
 @app.route('/files')
 def files_list():
@@ -462,9 +721,8 @@ def files_list():
 # ============================================
 @app.route('/search/file/<filename>')
 def search_by_file(filename):
-    """Belirli bir dosyada arama yapar"""
+    """Belirli bir dosyada arama yapar - sinirsiz sonuç"""
     query = request.args.get('q', '').strip()
-    limit = request.args.get('limit', 1000, type=int)
     
     if not query:
         return jsonify({'error': 'Query parameter "q" is required'}), 400
@@ -479,18 +737,23 @@ def search_by_file(filename):
     if not target_file or not os.path.exists(target_file):
         return jsonify({'error': f'File {filename} not found'}), 404
     
-    # Dosyada ara
-    found_lines = search_in_file(target_file, query, limit=limit)
+    # Dosyada ara (limit yok)
     results = []
+    query_lower = query.lower()
     
-    for line in found_lines:
-        detected = detect_format(line)
-        results.append({
-            'line': line,
-            'file': os.path.basename(target_file),
-            'username': detected['username'] if detected else 'Unknown',
-            'password': detected['password'] if detected else 'Unknown'
-        })
+    try:
+        with open(target_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                if query_lower in line.lower():
+                    parsed = parse_any_format(line)
+                    parsed['file'] = os.path.basename(target_file)
+                    results.append(parsed)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     
     return jsonify({
         'query': query,
@@ -500,54 +763,33 @@ def search_by_file(filename):
     })
 
 # ============================================
-# API: SEARCH WITH REGEX
+# API: EXPORT RESULTS
 # ============================================
-@app.route('/search/regex', methods=['POST'])
-def search_regex():
-    """Regex ile arama yapar"""
-    data = request.get_json()
-    if not data or 'pattern' not in data:
-        return jsonify({'error': 'Pattern required'}), 400
+@app.route('/export')
+def export_results():
+    """Sonuçları JSON veya TXT olarak dışa aktarır"""
+    query = request.args.get('q', '').strip()
+    format_type = request.args.get('format', 'json')  # json veya txt
     
-    pattern = data['pattern']
-    limit = data.get('limit', 1000)
+    if not query:
+        return jsonify({'error': 'Query parameter "q" is required'}), 400
     
-    try:
-        regex = re.compile(pattern, re.IGNORECASE)
-    except re.error as e:
-        return jsonify({'error': f'Invalid regex: {str(e)}'}), 400
+    results = search_in_all_files(query)
     
-    results = []
-    
-    for file_path in DATA_FILES:
-        if not os.path.exists(file_path):
-            continue
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    
-                    if regex.search(line):
-                        results.append({
-                            'line': line,
-                            'file': os.path.basename(file_path)
-                        })
-                        if len(results) >= limit:
-                            break
-        except Exception as e:
-            print(f"❌ Regex arama hatası ({file_path}): {e}")
-        
-        if len(results) >= limit:
-            break
-    
-    return jsonify({
-        'pattern': pattern,
-        'total': len(results),
-        'results': results
-    })
+    if format_type == 'txt':
+        # TXT formatında dışa aktar
+        output = []
+        for r in results:
+            output.append(r.get('full', ''))
+        return '\n'.join(output), 200, {'Content-Type': 'text/plain'}
+    else:
+        # JSON formatında dışa aktar
+        return jsonify({
+            'query': query,
+            'total': len(results),
+            'results': results,
+            'exported_at': datetime.now().isoformat()
+        })
 
 # ============================================
 # ERROR HANDLERS
@@ -573,12 +815,21 @@ if __name__ == '__main__':
         if not os.path.exists(file_path):
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(f'# accounts{i}.txt\n')
-                f.write('# Format: URL:user:pass | email:pass | user:pass\n\n')
+                f.write('# All formats supported: android://, email:pass, user:pass, url:user:pass, JSON, Cookies\n\n')
                 f.write('example:password\n')
     
-    print("🚀 API Başlatılıyor...")
+    print("🚀 Universal Account Parser Başlatılıyor...")
     print(f"📁 Veri klasörü: {DATA_DIR}")
     print(f"📄 Toplam dosya: {len(DATA_FILES)}")
+    print("📋 Desteklenen Formatlar:")
+    print("   ✅ android://TOKEN@PACKAGE/:USER:PASS")
+    print("   ✅ email:password")
+    print("   ✅ username:password")
+    print("   ✅ url:username:password")
+    print("   ✅ JSON format")
+    print("   ✅ Cookie format")
+    print("   ✅ Tüm diğer formatlar (ham olarak)")
+    print("🔍 SONUÇ LİMİTİ YOK - Tüm eşleşmeler döndürülür")
     
     # İstatistikleri göster
     stats, total = get_file_stats()
