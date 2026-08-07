@@ -31,6 +31,11 @@ def get_data_files():
                 f.write('alex:password123\n')
                 f.write('test@example.com:testpass\n')
                 f.write('192.168.1.1:admin:admin123\n')
+                f.write('URL: https://example.com/login\n')
+                f.write('Username: testuser@email.com\n')
+                f.write('Password: testpass123\n')
+                f.write('Application: Google_[Chrome]_Default\n')
+                f.write('===============\n')
         files = glob.glob(pattern)
     
     return sorted(files)
@@ -40,16 +45,8 @@ DATA_FILES = get_data_files()
 # ============================================
 # EVRENSEL PARSER - TÜM FORMATLAR
 # ============================================
-
 def parse_stealer_log(line):
-    """
-    Stealer log formatını parse eder:
-    URL: https://example.com/login
-    Username: user@email.com
-    Password: pass123
-    Application: Google_[Chrome]_Default
-    ===============
-    """
+    """Stealer log formatını parse eder"""
     if not line or 'URL:' not in line:
         return None
     
@@ -189,11 +186,8 @@ def parse_any_format(line):
 # ============================================
 # HIZLI ARAMA - TÜM DOSYALAR, TÜM FORMATLAR
 # ============================================
-
 def search_in_files_optimized(query):
-    """
-    Optimize edilmiş arama - Tüm dosyaları okur, tüm formatları otomatik parse eder
-    """
+    """Optimize edilmiş arama - Tüm dosyaları okur, tüm formatları otomatik parse eder"""
     if not query or query.strip() == '':
         return []
     
@@ -216,7 +210,6 @@ def search_in_files_optimized(query):
         
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                # Stealer log formatı için satırları birleştir
                 stealer_buffer = []
                 in_stealer = False
                 
@@ -228,7 +221,6 @@ def search_in_files_optimized(query):
                     
                     # Stealer log başlangıcı
                     if line.startswith('URL:'):
-                        # Önceki buffer'ı işle
                         if stealer_buffer:
                             full_entry = ' '.join(stealer_buffer)
                             if query_lower in full_entry.lower():
@@ -239,12 +231,8 @@ def search_in_files_optimized(query):
                                     all_results.append(parsed)
                                     
                                     if len(all_results) >= max_results:
-                                        print(f"✅ Maksimum sonuç limitine ulaşıldı: {max_results}")
-                                        elapsed = time.time() - start_time
-                                        print(f"⏱️ Toplam süre: {elapsed:.2f} saniye")
                                         return all_results
-                            stealer_buffer = []
-                        
+                        stealer_buffer = []
                         stealer_buffer.append(line)
                         in_stealer = True
                     
@@ -264,16 +252,12 @@ def search_in_files_optimized(query):
                                     all_results.append(parsed)
                                     
                                     if len(all_results) >= max_results:
-                                        print(f"✅ Maksimum sonuç limitine ulaşıldı: {max_results}")
-                                        elapsed = time.time() - start_time
-                                        print(f"⏱️ Toplam süre: {elapsed:.2f} saniye")
                                         return all_results
-                            stealer_buffer = []
-                            in_stealer = False
+                        stealer_buffer = []
+                        in_stealer = False
                     
                     # Normal satır
                     else:
-                        # Eğer stealer içinde değilsek normal ara
                         if not in_stealer:
                             if query_lower in line.lower():
                                 parsed = parse_any_format(line)
@@ -283,12 +267,8 @@ def search_in_files_optimized(query):
                                     all_results.append(parsed)
                                     
                                     if len(all_results) >= max_results:
-                                        print(f"✅ Maksimum sonuç limitine ulaşıldı: {max_results}")
-                                        elapsed = time.time() - start_time
-                                        print(f"⏱️ Toplam süre: {elapsed:.2f} saniye")
                                         return all_results
                         else:
-                            # Stealer içinde normal satır varsa ekle
                             if line and not line.startswith('URL:'):
                                 stealer_buffer.append(line)
                 
@@ -317,7 +297,6 @@ def search_in_files_optimized(query):
 # ============================================
 # CACHE YÖNETİMİ
 # ============================================
-
 class SearchCache:
     def __init__(self):
         self.cache = {}
@@ -344,13 +323,9 @@ search_cache = SearchCache()
 # ============================================
 # REST API ENDPOINTLERİ
 # ============================================
-
 @app.route('/search', methods=['GET'])
 def search():
-    """
-    Arama endpoint'i - Otomatik tüm formatları tarar
-    Kullanım: GET /search?q=aranacak_kelime
-    """
+    """Arama endpoint'i - Otomatik tüm formatları tarar"""
     query = request.args.get('q', '').strip()
     
     if not query:
@@ -428,7 +403,6 @@ def search_file(filename):
                 if not line:
                     continue
                 
-                # Stealer log başlangıcı
                 if line.startswith('URL:'):
                     if stealer_buffer:
                         full_entry = ' '.join(stealer_buffer)
@@ -470,7 +444,6 @@ def search_file(filename):
                         if line and not line.startswith('URL:'):
                             stealer_buffer.append(line)
             
-            # Kalan buffer
             if stealer_buffer:
                 full_entry = ' '.join(stealer_buffer)
                 if query_lower in full_entry.lower():
@@ -479,7 +452,7 @@ def search_file(filename):
                         parsed['file'] = file_name
                         parsed['line_number'] = 'end'
                         results.append(parsed)
-                        
+                    
     except Exception as e:
         return jsonify({
             'success': False,
@@ -658,23 +631,15 @@ if __name__ == '__main__':
             file_path = os.path.join(DATA_DIR, f'accounts{i}.txt')
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(f'# accounts{i}.txt\n')
-                # Android format
                 f.write('android://token123@com.example.app/:user1:pass123\n')
                 f.write('android://token456@com.test.app/:user2:pass456\n')
-                # Standart format
                 f.write('alex:password123\n')
                 f.write('test@example.com:testpass\n')
                 f.write('192.168.1.1:admin:admin123\n')
-                # Stealer log format
                 f.write('URL: https://example.com/login\n')
                 f.write('Username: testuser@email.com\n')
                 f.write('Password: testpass123\n')
                 f.write('Application: Google_[Chrome]_Default\n')
-                f.write('===============\n')
-                f.write('URL: https://another.com/login\n')
-                f.write('Username: another@email.com\n')
-                f.write('Password: anotherpass\n')
-                f.write('Application: Firefox_Default\n')
                 f.write('===============\n')
         print("✅ Örnek dosyalar oluşturuldu!")
     
@@ -708,4 +673,4 @@ if __name__ == '__main__':
     print("=" * 60)
     
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True) 
